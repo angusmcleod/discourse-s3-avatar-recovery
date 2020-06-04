@@ -8,43 +8,47 @@
 
 after_initialize do
   add_to_class(:upload_recovery, :recover_avatars) do
+    will_recover = []
+    
     User.find_each do |user|
       begin
         if user.has_uploaded_avatar
           upload = user.uploaded_avatar
           
           unless upload.local?
-            if @dry_run
-              puts "#{user.username} #{upload.url}"
-            else
-              ## we are only extracting a subset of the logic in recover_from_s3
-              ## here as we don't want to do everything that method does,
-              ## e.g. re-add the upload record
-              sha1 = upload.sha1
-              
-              @object_keys ||= begin
-                s3_helper = Discourse.store.s3_helper
+            
+            ## we are only extracting a subset of the logic in recover_from_s3
+            ## here as we don't want to do everything that method does,
+            ## e.g. re-add the upload record
+            
+            sha1 = upload.sha1
+            
+            @object_keys ||= begin
+              s3_helper = Discourse.store.s3_helper
 
-                if Rails.configuration.multisite
-                  current_db = RailsMultisite::ConnectionManagement.current_db
-                  s3_helper.list("uploads/#{current_db}/original").map(&:key).concat(
-                    s3_helper.list("uploads/#{FileStore::S3Store::TOMBSTONE_PREFIX}#{current_db}/original").map(&:key)
-                  )
-                else
-                  s3_helper.list("original").map(&:key).concat(
-                    s3_helper.list("#{FileStore::S3Store::TOMBSTONE_PREFIX}original").map(&:key)
-                  )
-                end
+              if Rails.configuration.multisite
+                current_db = RailsMultisite::ConnectionManagement.current_db
+                s3_helper.list("uploads/#{current_db}/original").map(&:key).concat(
+                  s3_helper.list("uploads/#{FileStore::S3Store::TOMBSTONE_PREFIX}#{current_db}/original").map(&:key)
+                )
+              else
+                s3_helper.list("original").map(&:key).concat(
+                  s3_helper.list("#{FileStore::S3Store::TOMBSTONE_PREFIX}original").map(&:key)
+                )
               end
-              
-              @object_keys.each do |key|
-                if key =~ /#{sha1}/
-                  tombstone_prefix = FileStore::S3Store::TOMBSTONE_PREFIX
+            end
+            
+            @object_keys.each do |key|
+              if key =~ /#{sha1}/
+                tombstone_prefix = FileStore::S3Store::TOMBSTONE_PREFIX
 
-                  if key.include?(tombstone_prefix)
+                if key.include?(tombstone_prefix)
+                  if @dry_run
+                    will_recover.push("#{user.username} #{key}")
+                  else
                     old_key = key
                     key = key.sub(tombstone_prefix, "")
-
+                    
                     Discourse.store.s3_helper.copy(
                       old_key,
                       key,
@@ -58,8 +62,13 @@ after_initialize do
         end
       rescue => e
         raise e if @stop_on_error
-        puts "#{user.username} #{e.class}: #{e.message}"
+        puts "Error: #{user.username} #{e.class}: #{e.message}"
       end
+    end
+    
+    if will_recover.any?
+      puts "Will attempt to recover these avatars:"
+      puts will_recover.join("\n")
     end
   end
 end
